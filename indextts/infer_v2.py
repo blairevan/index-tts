@@ -358,24 +358,30 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              return_timestamps=False, **generation_kwargs):
         if stream_return:
             return self.infer_generator(
                 spk_audio_prompt, text, output_path,
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                return_timestamps=return_timestamps, **generation_kwargs
             )
         else:
             try:
-                return list(self.infer_generator(
+                res = list(self.infer_generator(
                     spk_audio_prompt, text, output_path,
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                    return_timestamps=return_timestamps, **generation_kwargs
                 ))[0]
+                if return_timestamps:
+                    return res, getattr(self, "last_timestamps", [])
+                return res
             except IndexError:
                 return None
 
@@ -383,7 +389,8 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0,
+              return_timestamps=False, **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -510,11 +517,12 @@ class IndexTTS2:
             print( "     Tokens which can't be encoded: ", [t for t, id in zip(text_tokens_list, text_token_ids) if id == self.tokenizer.unk_token_id])
             print(f"     Consider updating the BPE model or modifying the text to avoid unknown tokens.")
                   
-        if verbose:
-            print("text_tokens_list:", text_tokens_list)
-            print("segments count:", segments_count)
-            print("max_text_tokens_per_segment:", max_text_tokens_per_segment)
-            print(*segments, sep="\n")
+        print(f">> [Tokenizer] text_tokens_list length: {len(text_tokens_list)}")
+        print(f">> [Tokenizer] segments count: {segments_count}")
+        print(f">> [Tokenizer] max_text_tokens_per_segment: {max_text_tokens_per_segment}")
+        for i, seg in enumerate(segments):
+            decoded_seg = self.tokenizer.decode(self.tokenizer.convert_tokens_to_ids(seg))
+            print(f"   >> Segment {i+1}: {decoded_seg}")
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
@@ -533,6 +541,8 @@ class IndexTTS2:
         bigvgan_time = 0
         has_warned = False
         silence = None # for stream_return
+        timestamps = []
+        current_time = 0.0
         for seg_idx, sent in enumerate(segments):
             self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
                                   f"speech synthesis {seg_idx + 1}/{segments_count}...")
@@ -666,6 +676,16 @@ class IndexTTS2:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
+                if return_timestamps:
+                    text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
+                    decoded_text = self.tokenizer.decode(text_tokens).strip()
+                    duration = wav.shape[-1] / sampling_rate
+                    timestamps.append({
+                        "start": round(current_time, 3),
+                        "end": round(current_time + duration, 3),
+                        "text": decoded_text
+                    })
+                    current_time += duration + (interval_silence / 1000.0)
                 if stream_return:
                     yield wav.cpu()
                     if silence == None:
@@ -684,6 +704,9 @@ class IndexTTS2:
         print(f">> Total inference time: {end_time - start_time:.2f} seconds")
         print(f">> Generated audio length: {wav_length:.2f} seconds")
         print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
+
+        if return_timestamps:
+            self.last_timestamps = timestamps
 
         # save audio
         wav = wav.cpu()  # to cpu
