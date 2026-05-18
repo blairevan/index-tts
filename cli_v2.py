@@ -179,6 +179,24 @@ def split_all_timestamps(timestamps):
     return new_timestamps
 
 
+def change_audio_speed(audio_path, speed):
+    if speed == 1.0:
+        return
+    import torchaudio
+    import librosa
+    import torch
+    
+    wav, sr = torchaudio.load(audio_path)
+    stretched_channels = []
+    for c in range(wav.shape[0]):
+        y = wav[c].numpy()
+        y_stretched = librosa.effects.time_stretch(y, rate=speed)
+        stretched_channels.append(torch.tensor(y_stretched, dtype=torch.float32))
+    
+    wav_stretched = torch.stack(stretched_channels, dim=0)
+    torchaudio.save(audio_path, wav_stretched, sr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="IndexTTS2 CLI Inference Tool (V2)")
     
@@ -186,6 +204,7 @@ def main():
     parser.add_argument("-t", "--text", type=str, required=True, help="Text to synthesize")
     parser.add_argument("-v", "--voice", type=str, required=True, help="Path to speaker reference audio (.wav)")
     parser.add_argument("-o", "--output", type=str, default="output_cli.wav", help="Output path for generated audio")
+    parser.add_argument("--speed", type=float, default=1.0, help="Audio playback speed factor (e.g. 1.2 or 0.8)")
     
     # Performance arguments
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 inference (Highly recommended for RTX GPUs)")
@@ -243,17 +262,26 @@ def main():
         
         if need_timestamps:
             output_path_result, timestamps = res
+            if args.speed != 1.0:
+                print(f">> [Speed] Changing audio playback speed to {args.speed}x...")
+                change_audio_speed(args.output, args.speed)
+            
             # Get total duration of the synthesized audio
             total_duration = timestamps[-1]["end"] if timestamps else 0.0
+            # Scale duration proportionally
+            scaled_duration = total_duration / args.speed
             # Split the exact original text to preserve lowercase words and original punctuation marks!
             # Also apply maximum character length restriction
             timestamps = split_subtitle_item({
                 "start": 0.0,
-                "end": total_duration,
+                "end": scaled_duration,
                 "text": args.text
             }, max_char_len=args.max_char_len)
         else:
             output_path_result = res
+            if args.speed != 1.0:
+                print(f">> [Speed] Changing audio playback speed to {args.speed}x...")
+                change_audio_speed(args.output, args.speed)
             timestamps = []
 
         print(f"\n>> Success! Audio saved to: {args.output}")
