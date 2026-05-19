@@ -302,11 +302,29 @@ def main():
 
             if args.json_subtitle:
                 import json
+                
+                # Fetch audio metadata using torchaudio, fallback to estimates if it fails
+                try:
+                    import torchaudio
+                    info = torchaudio.info(args.output)
+                    sample_rate = info.sample_rate
+                    total_seconds = round(info.num_frames / info.sample_rate, 2)
+                except Exception:
+                    sample_rate = 22050
+                    total_seconds = round(timestamps[-1]["end"], 2) if timestamps else 0.0
+
+                json_data = {
+                    "audio_file": os.path.basename(args.output),
+                    "sample_rate": sample_rate,
+                    "total_seconds": total_seconds,
+                    "sentences": timestamps
+                }
+
                 # Ensure parent directories exist
                 if os.path.dirname(args.json_subtitle) != "":
                     os.makedirs(os.path.dirname(args.json_subtitle), exist_ok=True)
                 with open(args.json_subtitle, "w", encoding="utf-8") as f:
-                    json.dump(timestamps, f, ensure_ascii=False, indent=2)
+                    json.dump(json_data, f, ensure_ascii=False, indent=2)
                 print(f">> JSON subtitle saved to: {args.json_subtitle}")
 
     except Exception as e:
