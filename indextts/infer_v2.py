@@ -672,9 +672,22 @@ class IndexTTS2:
                     wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
+                
+                # Apply a small fade-in (e.g. 5ms) and fade-out (e.g. 30ms) to avoid boundary clicks
+                sr = sampling_rate  # 22050
+                fade_in_len = int(sr * 0.005)  # 5ms -> 110 samples
+                fade_out_len = int(sr * 0.030) # 30ms -> 661 samples
+                
+                if wav.shape[-1] > (fade_in_len + fade_out_len):
+                    # Linear fade-in
+                    fade_in = torch.linspace(0.0, 1.0, fade_in_len, device=wav.device, dtype=wav.dtype)
+                    wav[:, :fade_in_len] *= fade_in
+                    # Linear fade-out
+                    fade_out = torch.linspace(1.0, 0.0, fade_out_len, device=wav.device, dtype=wav.dtype)
+                    wav[:, -fade_out_len:] *= fade_out
+
                 if verbose:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
-                # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
                 if return_timestamps:
                     text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
