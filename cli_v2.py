@@ -179,6 +179,119 @@ def split_all_timestamps(timestamps):
     return new_timestamps
 
 
+def parse_text_actions(text):
+    import re
+    # Match pause pattern: [pause:X.X]
+    pattern = r"\[pause:(\d+(?:\.\d+)?)\]"
+    parts = re.split(pattern, text)
+    
+    actions = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            if part.strip():
+                actions.append(('text', part))
+        else:
+            actions.append(('pause', float(part)))
+    return actions
+
+
+def clean_text_for_synthesis(text):
+    import re
+    # Convert [汉字|拼音] -> 拼音
+    text = re.sub(r'\[([^|\]]+)\|([^\]]+)\]', lambda m: f" {m.group(2)} ", text)
+    # Convert [connect:文字] -> 文字
+    text = re.sub(r'\[connect:(.*?)\]', r'\1', text)
+    return text
+
+
+def clean_text_for_subtitles(text):
+    import re
+    # Convert [汉字|拼音] -> 汉字
+    text = re.sub(r'\[([^|\]]+)\|([^\]]+)\]', r'\1', text)
+    # Convert [connect:文字] -> 文字
+    text = re.sub(r'\[connect:(.*?)\]', r'\1', text)
+    return text
+
+
+def concatenate_audio_actions(actions, tts, voice, emo, alpha, emo_text, max_tokens, speed, output_path, need_timestamps, max_char_len):
+    import torch
+    import torchaudio
+    import tempfile
+    
+    waveforms = []
+    sample_rate = 22050
+    current_time = 0.0
+    all_timestamps = []
+    
+    # Create temporary directory for segment synthesis
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for idx, action in enumerate(actions):
+            action_type, val = action
+            if action_type == 'text':
+                synth_text = clean_text_for_synthesis(val)
+                sub_text = clean_text_for_subtitles(val)
+                
+                temp_segment_path = os.path.join(temp_dir, f"seg_{idx}.wav")
+                
+                # Execute segment inference
+                tts.infer(
+                    spk_audio_prompt=voice,
+                    text=synth_text,
+                    output_path=temp_segment_path,
+                    emo_audio_prompt=emo,
+                    emo_alpha=alpha,
+                    use_emo_text=emo_text,
+                    max_text_tokens_per_segment=max_tokens,
+                    verbose=False,
+                    return_timestamps=need_timestamps
+                )
+                
+                waveform, sr = torchaudio.load(temp_segment_path)
+                sample_rate = sr
+                duration = waveform.shape[-1] / sr
+                
+                if need_timestamps:
+                    # Segment subtitle split over its exact duration
+                    seg_subtitles = split_subtitle_item({
+                        "start": 0.0,
+                        "end": duration,
+                        "text": sub_text
+                    }, max_char_len=max_char_len)
+                    
+                    # Shift segment subtitles by current_time
+                    for sub in seg_subtitles:
+                        sub["start"] = round(current_time + sub["start"], 3)
+                        sub["end"] = round(current_time + sub["end"], 3)
+                        all_timestamps.append(sub)
+                
+                waveforms.append(waveform)
+                current_time += duration
+                
+            elif action_type == 'pause':
+                pause_duration = val
+                num_channels = waveforms[-1].shape[0] if waveforms else 1
+                silence_samples = int(sample_rate * pause_duration)
+                silence_tensor = torch.zeros(num_channels, silence_samples, dtype=torch.float32)
+                waveforms.append(silence_tensor)
+                current_time += pause_duration
+                
+    if waveforms:
+        final_waveform = torch.cat(waveforms, dim=-1)
+        if os.path.dirname(output_path) != "":
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        torchaudio.save(output_path, final_waveform, sample_rate)
+        
+        if speed != 1.0:
+            change_audio_speed(output_path, speed)
+            if need_timestamps:
+                for sub in all_timestamps:
+                    sub["start"] = round(sub["start"] / speed, 3)
+                    sub["end"] = round(sub["end"] / speed, 3)
+                    
+    return all_timestamps
+
+
+
 def change_audio_speed(audio_path, speed):
     if speed == 1.0:
         return
@@ -247,42 +360,24 @@ def main():
 
         need_timestamps = bool(args.srt or args.json_subtitle)
 
-        # Execute inference
-        res = tts.infer(
-            spk_audio_prompt=args.voice,
-            text=args.text,
+        # Parse text actions for pauses and pronunciation markup
+        actions = parse_text_actions(args.text)
+        print(f">> Parsed actions: {actions}")
+
+        # Execute inference and audio concatenation
+        timestamps = concatenate_audio_actions(
+            actions=actions,
+            tts=tts,
+            voice=args.voice,
+            emo=args.emo,
+            alpha=args.alpha,
+            emo_text=args.emo_text,
+            max_tokens=args.max_tokens,
+            speed=args.speed,
             output_path=args.output,
-            emo_audio_prompt=args.emo,
-            emo_alpha=args.alpha,
-            use_emo_text=args.emo_text,
-            max_text_tokens_per_segment=args.max_tokens,
-            verbose=False,
-            return_timestamps=need_timestamps
+            need_timestamps=need_timestamps,
+            max_char_len=args.max_char_len
         )
-        
-        if need_timestamps:
-            output_path_result, timestamps = res
-            if args.speed != 1.0:
-                print(f">> [Speed] Changing audio playback speed to {args.speed}x...")
-                change_audio_speed(args.output, args.speed)
-            
-            # Get total duration of the synthesized audio
-            total_duration = timestamps[-1]["end"] if timestamps else 0.0
-            # Scale duration proportionally
-            scaled_duration = total_duration / args.speed
-            # Split the exact original text to preserve lowercase words and original punctuation marks!
-            # Also apply maximum character length restriction
-            timestamps = split_subtitle_item({
-                "start": 0.0,
-                "end": scaled_duration,
-                "text": args.text
-            }, max_char_len=args.max_char_len)
-        else:
-            output_path_result = res
-            if args.speed != 1.0:
-                print(f">> [Speed] Changing audio playback speed to {args.speed}x...")
-                change_audio_speed(args.output, args.speed)
-            timestamps = []
 
         print(f"\n>> Success! Audio saved to: {args.output}")
 
