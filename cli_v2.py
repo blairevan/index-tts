@@ -197,6 +197,8 @@ def parse_text_actions(text):
 
 def clean_text_for_synthesis(text):
     import re
+    # Convert [replace:原文|替换词] -> 替换词
+    text = re.sub(r'\[replace:([^|\]]+)\|([^\]]+)\]', lambda m: f" {m.group(2)} ", text)
     # Convert [汉字|拼音] -> 拼音
     text = re.sub(r'\[([^|\]]+)\|([^\]]+)\]', lambda m: f" {m.group(2)} ", text)
     # Convert [connect:文字] -> 文字
@@ -206,6 +208,8 @@ def clean_text_for_synthesis(text):
 
 def clean_text_for_subtitles(text):
     import re
+    # Convert [replace:原文|替换词] -> 原文
+    text = re.sub(r'\[replace:([^|\]]+)\|([^\]]+)\]', r'\1', text)
     # Convert [汉字|拼音] -> 汉字
     text = re.sub(r'\[([^|\]]+)\|([^\]]+)\]', r'\1', text)
     # Convert [connect:文字] -> 文字
